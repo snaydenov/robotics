@@ -1,3 +1,4 @@
+#line 1 "lineFollower.ino"
 // sensors (closer to center -> lower index)
 #define left3 A0
 #define left2 A1
@@ -7,33 +8,54 @@
 #define right3 A5
 
 //motors
-#define leftForward 5
-#define leftBack 6
-#define rightForward 10
-#define rightBack 11
+#define leftForward 6
+#define leftBack 5
+#define rightForward 9
+#define rightBack 10
 
 //boolean
 #define True  1
 #define False 0
 
-typedef struct SensorsStruct
-{
-  uint16_t mostLeft;
-  uint16_t midLeft;
-  uint16_t centLeft;
-  
-  uint16_t centRight;
-  uint16_t midRight;
-  uint16_t mostRight;
-} Sensors;
+//pid coeficients
+#define p_coef 20 
+#define d_coef 0
 
-typedef enum dir
+//constraints
+#define maximum 125
+#define maxSensorValue 50
+
+#include "Arduino.h"
+void setup();
+void loop();
+void UpdateSensors(struct SensorsStruct *sensors);
+void DetermineMotorSpeedAndDirection(
+          struct SensorsStruct *sensors, 
+          struct MotorsStruct *motors
+          );
+void CalibrateSensors(struct SensorsStruct* sensors);
+int ReadLine(struct SensorsStruct* sensors);
+void UpdateMotors(struct MotorsStruct *motors);
+bool MotorsNeedUpdate(struct MotorsStruct *motors);
+void initialize();
+#line 27
+struct SensorsStruct
+{
+  uint16_t left_0;
+  uint16_t left_1;
+  uint16_t left_2;
+  uint16_t right_2;
+  uint16_t right_1;
+  uint16_t right_0;
+};
+
+enum Direction
 {
   Forward,
   Back
-} Direction;
+};
 
-typedef struct MotorsStruct
+struct MotorsStruct
 {
   uint8_t   leftSpeed;
   Direction leftDir;
@@ -46,32 +68,37 @@ typedef struct MotorsStruct
   
   uint8_t   rightPrevSpeed;
   Direction rightPrevDir;
-} Motors;
+};
 
-Sensors sensors;
-Motors motors;
+struct SensorsStruct sensors;
+struct MotorsStruct motors;
 uint16_t threshhold = 500;
-
+int last_proportional = 0;
 void setup()
 {
-  init(); // +1 greatnessz
+  Serial.begin(9600);
+  initialize(); // +1 greatness
+  
 }
 
 void loop()
 {
+  
   UpdateSensors(&sensors);
   DetermineMotorSpeedAndDirection(&sensors, &motors);
   UpdateMotors(&motors);
+  
+  
 }
 
 void UpdateSensors(struct SensorsStruct *sensors)
 {
-  sensors->mostLeft = analogRead(left3);
-  sensors->midLeft = analogRead(left2);
-  sensors->centLeft = analogRead(left1);
-  sensors->centRight = analogRead(right1);
-  sensors->midRight = analogRead(right2);
-  sensors->mostRight = analogRead(right3);
+  sensors->left_0 = analogRead(left3);
+  sensors->left_1 = analogRead(left2);
+  sensors->left_2 = analogRead(left1);
+  sensors->right_2 = analogRead(right1);
+  sensors->right_1 = analogRead(right2);
+  sensors->right_0 = analogRead(right3);
 }
 
 void DetermineMotorSpeedAndDirection(
@@ -79,21 +106,96 @@ void DetermineMotorSpeedAndDirection(
           struct MotorsStruct *motors
           )
 {
-  if(sensors->midLeft > threshhold)
-  {
-    motors->leftSpeed = 150;
-    motors->leftDir = Forward;
-    motors->rightSpeed = 255;
-    motors->rightDir = Forward;
-  }
+  int proportional = ReadLine(sensors);
   
-  if(sensors->midRight > threshhold)
+  
+  
+  // Compute the derivative (change) and integral (sum) of the
+  // position.
+  int derivative = proportional - last_proportional;
+
+  last_proportional = proportional;
+  
+
+  int power_difference = proportional/p_coef + derivative*d_coef;
+
+  if (power_difference > maximum)
+    power_difference = maximum;
+  if (power_difference < -maximum)
+    power_difference = -maximum;
+  
+  if (power_difference < 0)
   {
-    motors->leftSpeed = 255;
-    motors->leftDir = Forward;
-    motors->rightSpeed = 150;
-    motors->rightDir = Forward;
+    motors -> rightSpeed = maximum + power_difference;
+    motors -> leftSpeed = maximum - power_difference/3;
   }
+  else
+  {
+    motors -> rightSpeed = maximum +power_difference/3;
+    motors -> leftSpeed = maximum - power_difference;
+  }
+}
+
+void CalibrateSensors(struct SensorsStruct* sensors)
+{
+  sensors -> left_2 = sensors -> left_2*2;
+  sensors -> left_1 = sensors -> left_1*2;
+  sensors -> left_0 = sensors -> left_0*2;
+  sensors -> right_2 = sensors -> right_2*2;
+  sensors -> right_1 = sensors -> right_1*2;
+  sensors -> right_0 = sensors -> right_0*2;
+}
+
+int ReadLine(struct SensorsStruct* sensors)
+{
+	unsigned char i, on_line = 0;
+	unsigned long avg; // this is for the weighted total, which is long
+	                   // before division
+	float sum; // this is for the denominator which is <= 64000
+	static int last_value=0; // assume initially that the line is left.
+
+	CalibrateSensors(sensors);
+        
+	avg = 0;
+	sum = 0;
+        int sensor_values[6];
+        sensor_values[0] = sensors -> left_0;
+        sensor_values[1] = sensors -> left_1;
+        sensor_values[2] = sensors -> left_2;
+        sensor_values[3] = sensors -> right_2;
+        sensor_values[4] = sensors -> right_1;
+        sensor_values[5] = sensors -> right_0;
+	for(i=0;i<6;i++) {
+		int value = sensor_values[i];
+		
+		// keep track of whether we see the line at all
+		if(value > 200) {
+                        
+                        
+			on_line = 1;
+		}
+		
+		// only average in values that are above a noise threshold
+		if(value > 20) {
+			avg += (long)(value) * (i);
+			sum += (float)value/1000;
+		}
+	}
+        
+	if(!on_line)
+	{
+		// If it last read to the left of center, return 0.
+		if(last_value < (5)*1000/2)
+			return -2500;
+		
+		// If it last read to the right of center, return the max.
+		else
+			return 2500;
+
+	}
+        
+	last_value = avg/sum;
+        return last_value - 2500;
 }
 
 void UpdateMotors(struct MotorsStruct *motors)
@@ -151,7 +253,7 @@ bool MotorsNeedUpdate(struct MotorsStruct *motors)
   return False;
 }
 
-void init()
+void initialize()
 {
   // port initialisation
   DDRD &= 3;// 0 and 1 are serial pins 3 = 0000 0011 in binary
@@ -177,4 +279,9 @@ void init()
   
   memset((void *) &sensors, 0, sizeof(sensors));
   memset((void *) &motors, 0, sizeof(motors));
+  
+  motors.leftDir = Forward;
+  motors.rightDir = Forward;
 }
+
+
